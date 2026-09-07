@@ -1041,14 +1041,16 @@ function onSearch(val) {
 
 // ── Export ────────────────────────────────────────────────────────────────────
 function xCSV(tblId, name) {
+  var Q  = String.fromCharCode(34);
+  var NL = String.fromCharCode(10);
   var tbl  = document.getElementById(tblId);
   var rows = Array.prototype.slice.call(tbl.querySelectorAll('tr'));
   var csv  = rows.map(function(row) {
     var cells = Array.prototype.slice.call(row.querySelectorAll('th,td'));
     return cells.map(function(c) {
-      return '"' + c.innerText.replace(/"/g, '""') + '"';
+      return Q + c.innerText.split(Q).join(Q + Q) + Q;
     }).join(',');
-  }).join('\n');
+  }).join(NL);
   dl(new Blob([csv], { type: 'text/csv' }), name + '_' + td() + '.csv');
 }
 
