@@ -1,0 +1,13 @@
+name            = "msp-tracker"
+main            = "src/index.js"
+compatibility_date = "2025-01-01"
+
+[[d1_databases]]
+binding      = "DB"
+database_name = "msp-tracker"
+database_id  = "REPLACE_WITH_YOUR_DATABASE_ID"
+
+# Add route in CF dashboard:
+#   Workers & Pages → your worker → Settings → Triggers → Add Route
+#   Pattern: digsyndemos.com/server*
+#   Zone:    digsyndemos.com
