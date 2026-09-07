@@ -197,14 +197,25 @@ async function route(req, env, path, url) {
         `INSERT INTO servers (server_name, type, environment, status, enabled, enabled_date, monthly_cost, notes)
          VALUES (?,?,?,'active',0,null,?,?)`
       );
+      // Normalize headers so "Server Name", "SERVER NAME", "server_name", and
+      // "ServerName" all resolve the same way — matches our own export output
+      // and any reasonably-named spreadsheet a person hands in.
+      const norm = row => {
+        const out = {};
+        for (const k in row) out[k.toLowerCase().replace(/[^a-z0-9]/g, '')] = row[k];
+        return out;
+      };
+      const str = v => (v === undefined || v === null ? '' : String(v)).trim();
+      const num = v => parseFloat(str(v).replace(/[^0-9.\-]/g, '')) || 0;
       const batch = items.map(row => {
-        const name = (row.server_name || row['Server Name'] || row['ServerName'] || '').trim();
+        const n = norm(row);
+        const name = str(n.servername);
         return stmt.bind(
           name || 'Unnamed',
-          (row.type        || row['Type']         || '').trim(),
-          (row.environment || row['Environment']   || '').trim(),
-          parseFloat(row.monthly_cost || row['Monthly Cost'] || row['MonthlyCost'] || 0),
-          (row.notes       || row['Notes']         || '').trim()
+          str(n.type),
+          str(n.environment),
+          num(n.monthlycost),
+          str(n.notes)
         );
       });
       await db.batch(batch);
@@ -400,8 +411,8 @@ footer a{color:var(--ac);text-decoration:none}
         <option value="1">Enabled</option>
         <option value="0">Disabled</option>
       </select>
-      <button class="btn btn-gh btn-sm" onclick="xCSV('dashTbl','servers')">CSV</button>
-      <button class="btn btn-gh btn-sm" onclick="xXLS('dashTbl','servers')">XLS</button>
+      <button class="btn btn-gh btn-sm" onclick="xCSV('servers')">CSV</button>
+      <button class="btn btn-gh btn-sm" onclick="xXLS('servers')">XLS</button>
     </div>
   </div>
   <div class="twrap">
@@ -429,8 +440,8 @@ footer a{color:var(--ac);text-decoration:none}
       </select>
     </div>
     <div class="tright">
-      <button class="btn btn-gh btn-sm" onclick="xCSV('logsTbl','status_log')">CSV</button>
-      <button class="btn btn-gh btn-sm" onclick="xXLS('logsTbl','status_log')">XLS</button>
+      <button class="btn btn-gh btn-sm" onclick="xCSV('status_log')">CSV</button>
+      <button class="btn btn-gh btn-sm" onclick="xXLS('status_log')">XLS</button>
     </div>
   </div>
   <div class="twrap">
@@ -451,8 +462,8 @@ footer a{color:var(--ac);text-decoration:none}
       <input type="date" id="fTxnE"   onchange="renderTxn()">
     </div>
     <div class="tright">
-      <button class="btn btn-gh btn-sm" onclick="xCSV('txnTbl','transactions')">CSV</button>
-      <button class="btn btn-gh btn-sm" onclick="xXLS('txnTbl','transactions')">XLS</button>
+      <button class="btn btn-gh btn-sm" onclick="xCSV('transactions')">CSV</button>
+      <button class="btn btn-gh btn-sm" onclick="xXLS('transactions')">XLS</button>
     </div>
   </div>
   <div class="twrap">
@@ -476,8 +487,8 @@ footer a{color:var(--ac);text-decoration:none}
     <button class="btn btn-pri" onclick="runBilling()">Calculate</button>
     <div class="tright">
       <button class="btn btn-ok" id="saveTxnBtn" onclick="saveAsTxn()" style="display:none">&#128190; Save as Transaction</button>
-      <button class="btn btn-gh btn-sm" onclick="xCSV('billTbl','billing')">CSV</button>
-      <button class="btn btn-gh btn-sm" onclick="xXLS('billTbl','billing')">XLS</button>
+      <button class="btn btn-gh btn-sm" onclick="xCSV('billing')">CSV</button>
+      <button class="btn btn-gh btn-sm" onclick="xXLS('billing')">XLS</button>
     </div>
   </div>
   <div class="twrap">
@@ -566,7 +577,8 @@ var API = '/server/api';
 var ST = {
   servers: [], logs: [], txns: [],
   billingRows: [], search: '',
-  editId: null, dcId: null, importRows: []
+  editId: null, dcId: null, importRows: [],
+  viewServers: [], viewLogs: [], viewTxns: []
 };
 
 // ── Boot ─────────────────────────────────────────────────────────────────────
@@ -632,6 +644,8 @@ function renderDash() {
     if (q && !srvMatch(s, q)) return false;
     return true;
   });
+
+  ST.viewServers = rows;
 
   var body = document.getElementById('dashBody');
   if (!rows.length) {
@@ -833,6 +847,8 @@ function renderLogs() {
     return true;
   });
 
+  ST.viewLogs = rows;
+
   var body = document.getElementById('logsBody');
   if (!rows.length) {
     body.innerHTML = '<tr><td colspan="5" class="empty">No log entries</td></tr>';
@@ -881,6 +897,8 @@ function renderTxn() {
     }
     return true;
   });
+
+  ST.viewTxns = rows;
 
   var body = document.getElementById('txnBody');
   if (!rows.length) {
@@ -964,6 +982,7 @@ function runBilling() {
 
   results.sort(function(a, b) { return a.server_name.localeCompare(b.server_name); });
   lastBilling = results;
+  ST.billingRows = results;
 
   var body = document.getElementById('billBody');
   if (!results.length) {
@@ -1040,25 +1059,80 @@ function onSearch(val) {
 }
 
 // ── Export ────────────────────────────────────────────────────────────────────
-function xCSV(tblId, name) {
-  var Q  = String.fromCharCode(34);
-  var NL = String.fromCharCode(10);
-  var tbl  = document.getElementById(tblId);
-  var rows = Array.prototype.slice.call(tbl.querySelectorAll('tr'));
-  var csv  = rows.map(function(row) {
-    var cells = Array.prototype.slice.call(row.querySelectorAll('th,td'));
-    return cells.map(function(c) {
-      return Q + c.innerText.split(Q).join(Q + Q) + Q;
-    }).join(',');
-  }).join(NL);
-  dl(new Blob([csv], { type: 'text/csv' }), name + '_' + td() + '.csv');
+// Builds export data straight from the underlying (filtered) data arrays —
+// never scrapes the rendered table — so button labels, toggle switches, and
+// other UI-only markup never leak into an exported file. Headers for the
+// server export match what /import expects, so export -> import round-trips.
+function exportData(kind) {
+  if (kind === 'servers') {
+    return {
+      headers: ['Server Name', 'Type', 'Environment', 'Status', 'Enabled', 'Enabled Date', 'Monthly Cost', 'Notes'],
+      rows: ST.viewServers.map(function(s) {
+        return [
+          s.server_name || '', s.type || '', s.environment || '',
+          s.status || '', s.enabled ? 'Yes' : 'No', s.enabled_date || '',
+          numOrBlank(s.monthly_cost), s.notes || ''
+        ];
+      })
+    };
+  }
+  if (kind === 'status_log') {
+    return {
+      headers: ['Timestamp', 'Server Name', 'Action', 'Notes'],
+      rows: ST.viewLogs.map(function(l) {
+        return [fmtTs(l.timestamp), l.server_name || '', l.action || '', l.notes || ''];
+      })
+    };
+  }
+  if (kind === 'transactions') {
+    return {
+      headers: ['TXN ID', 'Server Name', 'Action', 'Days Billed', 'Amount', 'Period Start', 'Period End', 'Date', 'Notes'],
+      rows: ST.viewTxns.map(function(t) {
+        return [
+          t.txn_id || '', t.server_name || '', t.action || '',
+          numOrBlank(t.days_billed), numOrBlank(t.amount),
+          t.period_start || '', t.period_end || '', t.date || '', t.notes || ''
+        ];
+      })
+    };
+  }
+  if (kind === 'billing') {
+    return {
+      headers: ['Server Name', 'Type', 'Environment', 'Enabled Since', 'Days Active', 'Month Days', 'Monthly Cost', 'Amount Due'],
+      rows: ST.billingRows.map(function(r) {
+        return [
+          r.server_name || '', r.type || '', r.environment || '', r.enabled_date || '',
+          numOrBlank(r.daysActive), numOrBlank(r.daysInMonth),
+          numOrBlank(r.monthly_cost), numOrBlank(r.amount)
+        ];
+      })
+    };
+  }
+  return { headers: [], rows: [] };
 }
 
-function xXLS(tblId, name) {
+function numOrBlank(v) {
+  return (v === null || v === undefined || v === '') ? '' : v;
+}
+
+function xCSV(kind) {
+  var Q  = String.fromCharCode(34);
+  var NL = String.fromCharCode(10);
+  var esc = function(v) { return Q + String(v).split(Q).join(Q + Q) + Q; };
+  var data = exportData(kind);
+  var lines = [data.headers.map(esc).join(',')].concat(
+    data.rows.map(function(row) { return row.map(esc).join(','); })
+  );
+  var csv = lines.join(NL);
+  dl(new Blob([csv], { type: 'text/csv' }), kind + '_' + td() + '.csv');
+}
+
+function xXLS(kind) {
+  var data = exportData(kind);
   var wb = XLSX.utils.book_new();
-  var ws = XLSX.utils.table_to_sheet(document.getElementById(tblId));
-  XLSX.utils.book_append_sheet(wb, ws, name);
-  XLSX.writeFile(wb, name + '_' + td() + '.xlsx');
+  var ws = XLSX.utils.aoa_to_sheet([data.headers].concat(data.rows));
+  XLSX.utils.book_append_sheet(wb, ws, kind);
+  XLSX.writeFile(wb, kind + '_' + td() + '.xlsx');
 }
 
 function dl(blob, filename) {
