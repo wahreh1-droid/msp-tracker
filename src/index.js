@@ -1095,7 +1095,7 @@ function hl(text) { // highlight search term
   var t = String(text);
   if (!ST.search) return eh(t);
   var q    = ST.search;
-  var re   = new RegExp('(' + q.replace(/[.*+?^${}()|[\]\\]/g,'\\$&') + ')', 'gi');
+  var re   = new RegExp('(' + q.replace(/[.*+?{}^$()|[\]\\]/g,'\\$&') + ')', 'gi');
   var parts = t.split(re);
   return parts.map(function(p, i) {
     return (i % 2 === 1) ? '<mark>' + eh(p) + '</mark>' : eh(p);
