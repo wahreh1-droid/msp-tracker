@@ -230,6 +230,41 @@ async function route(req, env, path, url) {
       return J({ ok: true });
     }
 
+    // ── POST /auth/password — any logged-in user changes their OWN password
+    // Requires the current password, so a hijacked session can't silently lock the owner out.
+    if (path === '/auth/password' && m === 'POST') {
+      const b = await req.json();
+      const current = b.current_password || '';
+      const next    = b.new_password || '';
+      if (next.length < 8) return E('New password must be at least 8 characters');
+      const row = await db.prepare('SELECT * FROM users WHERE id=?').bind(user.id).first();
+      if (!row) return E('User not found', 404);
+      const curHash = await hashPassword(current, row.salt);
+      if (curHash !== row.password_hash) return E('Current password is incorrect', 401);
+      const salt = randomHex(16);
+      const hash = await hashPassword(next, salt);
+      await db.prepare('UPDATE users SET password_hash=?, salt=? WHERE id=?').bind(hash, salt, user.id).run();
+      return J({ ok: true });
+    }
+
+    // ── POST /auth/users/:id/password — admin resets someone else's password
+    // No current password needed (the admin doesn't know it) — this is the
+    // "team member forgot their password" path.
+    const mUserPwd = path.match(/^\/auth\/users\/(\d+)\/password$/);
+    if (mUserPwd && m === 'POST') {
+      if (user.role !== 'admin') return E('Admins only', 403);
+      const targetId = mUserPwd[1];
+      const b = await req.json();
+      const next = b.new_password || '';
+      if (next.length < 8) return E('New password must be at least 8 characters');
+      const target = await db.prepare('SELECT id FROM users WHERE id=?').bind(targetId).first();
+      if (!target) return E('User not found', 404);
+      const salt = randomHex(16);
+      const hash = await hashPassword(next, salt);
+      await db.prepare('UPDATE users SET password_hash=?, salt=? WHERE id=?').bind(hash, salt, targetId).run();
+      return J({ ok: true });
+    }
+
     // ── GET /servers ──────────────────────────────────────────────────────
     if (path === '/servers' && m === 'GET') {
       const r = await db.prepare(
@@ -607,6 +642,7 @@ footer a{color:var(--ac);text-decoration:none}
   </div>
   <div class="acct">
     <span id="acctName" class="acct-name"></span>
+    <button class="btn btn-gh btn-sm" onclick="openChangePwd()">Change Password</button>
     <button class="btn btn-gh btn-sm" onclick="doLogout()">Logout</button>
   </div>
 </header>
@@ -830,6 +866,35 @@ footer a{color:var(--ac);text-decoration:none}
   </div>
 </div>
 
+<!-- ── CHANGE OWN PASSWORD MODAL ─────────────────────────────────────────── -->
+<div class="moverlay" id="pwdModal">
+  <div class="modal">
+    <h2>Change Password</h2>
+    <div class="fg"><label>Current Password *</label><input type="password" id="pCurrent" autocomplete="current-password"></div>
+    <div class="fg"><label>New Password *</label><input type="password" id="pNew" autocomplete="new-password" placeholder="At least 8 characters"></div>
+    <div class="fg"><label>Confirm New Password *</label><input type="password" id="pConfirm" autocomplete="new-password"></div>
+    <div class="mfoot">
+      <button class="btn btn-gh" onclick="closeModal('pwdModal')">Cancel</button>
+      <button class="btn btn-pri" onclick="saveOwnPassword()">Change Password</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── ADMIN RESET PASSWORD MODAL ────────────────────────────────────────── -->
+<div class="moverlay" id="resetModal">
+  <div class="modal">
+    <h2>Reset Password</h2>
+    <p style="color:var(--tx2);font-size:13px;margin-bottom:14px">
+      Setting a new password for <strong id="resetWho"></strong>. Give it to them directly and ask them to change it after signing in.
+    </p>
+    <div class="fg"><label>New Password *</label><input type="password" id="rNew" autocomplete="new-password" placeholder="At least 8 characters"></div>
+    <div class="mfoot">
+      <button class="btn btn-gh" onclick="closeModal('resetModal')">Cancel</button>
+      <button class="btn btn-pri" onclick="saveResetPassword()">Reset Password</button>
+    </div>
+  </div>
+</div>
+
 <script>
 // ── Constants ────────────────────────────────────────────────────────────────
 var API = '/server/api';
@@ -838,7 +903,7 @@ var API = '/server/api';
 var ST = {
   servers: [], logs: [], txns: [], users: [],
   billingRows: [], search: '',
-  editId: null, dcId: null, importRows: [],
+  editId: null, dcId: null, importRows: [], resetId: null,
   viewServers: [], viewLogs: [], viewTxns: [],
   currentUser: null
 };
@@ -1498,15 +1563,18 @@ function renderUsers() {
   var html = '';
   ST.users.forEach(function(u, i) {
     var canDelete = !(ST.currentUser && u.id === ST.currentUser.id);
+    var acts = '<button class="btn btn-gh btn-sm" onclick="openResetPwd(' + u.id + ',' + eaAttr(u.username) + ')">Reset Password</button>';
+    if (canDelete) {
+      acts += ' <button class="btn btn-del btn-sm" onclick="deleteUser(' + u.id + ',' + eaAttr(u.username) + ')">Del</button>';
+    } else {
+      acts += ' <span style="color:var(--tx3);font-size:12px">You</span>';
+    }
     html += '<tr>' +
       '<td>' + (i + 1) + '</td>' +
       '<td>' + eh(u.username) + '</td>' +
       '<td><span class="badge ' + (u.role === 'admin' ? 'badge-enabled' : '') + '">' + u.role + '</span></td>' +
       '<td style="white-space:nowrap">' + fmtTs(u.created_at) + '</td>' +
-      '<td>' + (canDelete
-        ? '<button class="btn btn-del btn-sm" onclick="deleteUser(' + u.id + ',' + eaAttr(u.username) + ')">Del</button>'
-        : '<span style="color:var(--tx3);font-size:12px">You</span>') +
-      '</td>' +
+      '<td><div class="actions">' + acts + '</div></td>' +
       '</tr>';
   });
   body.innerHTML = html;
@@ -1542,6 +1610,47 @@ function deleteUser(id, username) {
     .then(function() { return loadUsers(); })
     .then(function() { toast('User deleted', 'ok'); })
     .catch(function(e) { toast('Delete failed: ' + e.message, 'err'); });
+}
+
+// ── Passwords ────────────────────────────────────────────────────────────────
+function openChangePwd() {
+  document.getElementById('pCurrent').value = '';
+  document.getElementById('pNew').value     = '';
+  document.getElementById('pConfirm').value = '';
+  openModal('pwdModal');
+}
+
+function saveOwnPassword() {
+  var cur = document.getElementById('pCurrent').value;
+  var nw  = document.getElementById('pNew').value;
+  var cf  = document.getElementById('pConfirm').value;
+  if (!cur) { toast('Enter your current password', 'err'); return; }
+  if (nw.length < 8) { toast('New password must be at least 8 characters', 'err'); return; }
+  if (nw !== cf) { toast('New passwords do not match', 'err'); return; }
+  api('/auth/password', { method: 'POST', body: { current_password: cur, new_password: nw } })
+    .then(function() {
+      closeModal('pwdModal');
+      toast('Password changed', 'ok');
+    })
+    .catch(function(e) { toast(e.message, 'err'); });
+}
+
+function openResetPwd(id, username) {
+  ST.resetId = id;
+  document.getElementById('resetWho').textContent = username;
+  document.getElementById('rNew').value = '';
+  openModal('resetModal');
+}
+
+function saveResetPassword() {
+  var nw = document.getElementById('rNew').value;
+  if (nw.length < 8) { toast('Password must be at least 8 characters', 'err'); return; }
+  api('/auth/users/' + ST.resetId + '/password', { method: 'POST', body: { new_password: nw } })
+    .then(function() {
+      closeModal('resetModal');
+      toast('Password reset', 'ok');
+    })
+    .catch(function(e) { toast('Reset failed: ' + e.message, 'err'); });
 }
 
 // ── Modal helpers ─────────────────────────────────────────────────────────────
