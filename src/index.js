@@ -394,6 +394,7 @@ async function route(req, env, path, url) {
 
     // ── POST /servers ─────────────────────────────────────────────────────
     if (path === '/servers' && m === 'POST') {
+      if (user.role !== 'admin') return E('Admins only', 403);
       const b = await req.json();
       if (!b.server_name?.trim()) return E('server_name is required');
       const r = await db.prepare(
@@ -412,6 +413,7 @@ async function route(req, env, path, url) {
     // ── PUT /servers/:id ──────────────────────────────────────────────────
     const mEdit = path.match(/^\/servers\/(\d+)$/);
     if (mEdit && m === 'PUT') {
+      if (user.role !== 'admin') return E('Admins only', 403);
       const id = mEdit[1];
       const b  = await req.json();
       if (!b.server_name?.trim()) return E('server_name is required');
@@ -430,6 +432,7 @@ async function route(req, env, path, url) {
 
     // ── DELETE /servers/:id ───────────────────────────────────────────────
     if (mEdit && m === 'DELETE') {
+      if (user.role !== 'admin') return E('Admins only', 403);
       await db.prepare('DELETE FROM servers WHERE id=?').bind(mEdit[1]).run();
       return J({ ok: true });
     }
@@ -457,6 +460,7 @@ async function route(req, env, path, url) {
     // ── POST /servers/:id/decommission ────────────────────────────────────
     const mDecomm = path.match(/^\/servers\/(\d+)\/decommission$/);
     if (mDecomm && m === 'POST') {
+      if (user.role !== 'admin') return E('Admins only', 403);
       const id = mDecomm[1];
       const b  = await req.json();
       await db.prepare(
@@ -530,6 +534,7 @@ async function route(req, env, path, url) {
 
     // ── POST /import ──────────────────────────────────────────────────────
     if (path === '/import' && m === 'POST') {
+      if (user.role !== 'admin') return E('Admins only', 403);
       const items = await req.json();
       if (!Array.isArray(items) || !items.length) return E('No rows to import');
       const stmt = db.prepare(
@@ -779,8 +784,8 @@ footer a{color:var(--ac);text-decoration:none}
 <!-- ── DASHBOARD ─────────────────────────────────────────────────────────── -->
 <div id="tab-dashboard" class="tab active">
   <div class="toolbar">
-    <button class="btn btn-pri" onclick="openAdd()">&#43; Add Server</button>
-    <button class="btn btn-gh"  onclick="openImport()">&#8659; Import CSV / Excel</button>
+    <button class="btn btn-pri" id="addSrvBtn" onclick="openAdd()">&#43; Add Server</button>
+    <button class="btn btn-gh"  id="impSrvBtn" onclick="openImport()">&#8659; Import CSV / Excel</button>
     <div class="tright">
       <select id="fStatus" onchange="renderDash()">
         <option value="">All Status</option>
@@ -1145,6 +1150,8 @@ function enterApp(user) {
   document.getElementById('app').style.display = 'block';
   document.getElementById('acctName').textContent = user.username + ' (' + user.role + ')';
   document.getElementById('usersTabBtn').style.display = user.role === 'admin' ? '' : 'none';
+  document.getElementById('addSrvBtn').style.display   = user.role === 'admin' ? '' : 'none';
+  document.getElementById('impSrvBtn').style.display   = user.role === 'admin' ? '' : 'none';
   document.getElementById('authPassword').value = '';
   loadAll();
 }
@@ -1233,22 +1240,38 @@ function renderDash() {
     return;
   }
 
+  var isAdmin = ST.currentUser && ST.currentUser.role === 'admin';
   var html = '';
   rows.forEach(function(s, i) {
     var tog = '';
     if (s.status === 'decommissioned') {
       tog = '<span class="badge badge-decommissioned">N/A</span>';
-    } else {
+    } else if (isAdmin) {
+      // Admin: full toggle (enable + disable)
       tog = '<label class="toggle">' +
         '<input type="checkbox"' + (s.enabled ? ' checked' : '') +
         ' onchange="toggleSrv(' + s.id + ',this.checked)">' +
         '<span class="trk"></span></label>';
+    } else if (!s.enabled) {
+      // User: can only enable a disabled server
+      tog = '<label class="toggle">' +
+        '<input type="checkbox"' +
+        ' onchange="toggleSrv(' + s.id + ',this.checked)">' +
+        '<span class="trk"></span></label>';
+    } else {
+      // User: server is already enabled — show toggle locked on
+      tog = '<label class="toggle" title="Only admins can disable servers">' +
+        '<input type="checkbox" checked disabled>' +
+        '<span class="trk"></span></label>';
     }
-    var acts = '<button class="btn btn-gh btn-sm" onclick="openEdit(' + s.id + ')">Edit</button>';
-    if (s.status !== 'decommissioned') {
-      acts += ' <button class="btn btn-warn btn-sm" onclick="openDc(' + s.id + ')">Decomm</button>';
+    var acts = '';
+    if (isAdmin) {
+      acts = '<button class="btn btn-gh btn-sm" onclick="openEdit(' + s.id + ')">Edit</button>';
+      if (s.status !== 'decommissioned') {
+        acts += ' <button class="btn btn-warn btn-sm" onclick="openDc(' + s.id + ')">Decomm</button>';
+      }
+      acts += ' <button class="btn btn-del btn-sm" onclick="delSrv(' + s.id + ')">Del</button>';
     }
-    acts += ' <button class="btn btn-del btn-sm" onclick="delSrv(' + s.id + ')">Del</button>';
 
     html += '<tr>' +
       '<td>' + (i + 1) + '</td>' +
