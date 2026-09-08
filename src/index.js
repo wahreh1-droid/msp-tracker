@@ -1,10 +1,13 @@
 // MSP Server Tracker — Cloudflare Worker
-// Deploy target : digsyndemos.com/server
+// Deploy target : msp-server.digsyn.ai  (app served at the domain root)
 // DB binding    : DB  (D1)
 // Initialize DB : npx wrangler d1 execute msp-tracker --file=schema.sql --remote
 // Deploy        : npx wrangler deploy
 
-const BASE = '/server';
+// The app now lives at the root of its own subdomain. '/server' is kept as a
+// legacy alias so the old digsyndemos.com/server links and the workers.dev
+// test URL keep working; it can be removed once nothing points there.
+const LEGACY_BASE = '/server';
 
 // ── CORS & response helpers ──────────────────────────────────────────────────
 const CORS = {
@@ -109,15 +112,17 @@ export default {
 
     if (req.method === 'OPTIONS') return new Response(null, { headers: CORS });
 
-    // Serve HTML at /server or /server/
-    if (path === BASE || path === BASE + '/') {
+    // Serve the app at the root, or at the legacy /server path
+    if (path === '/' || path === LEGACY_BASE) {
       return new Response(HTML, { headers: { 'Content-Type': 'text/html;charset=utf-8' } });
     }
 
-    // API routes under /server/api/
-    if (path.startsWith(BASE + '/api')) {
-      const sub = path.slice((BASE + '/api').length) || '/';
-      return route(req, env, sub, url);
+    // API routes: /api/... at the root, or legacy /server/api/...
+    if (path.startsWith('/api')) {
+      return route(req, env, path.slice('/api'.length) || '/', url);
+    }
+    if (path.startsWith(LEGACY_BASE + '/api')) {
+      return route(req, env, path.slice((LEGACY_BASE + '/api').length) || '/', url);
     }
 
     return new Response('Not found', { status: 404 });
@@ -1011,7 +1016,7 @@ footer a{color:var(--ac);text-decoration:none}
 
 <script>
 // ── Constants ────────────────────────────────────────────────────────────────
-var API = '/server/api';
+var API = '/api';
 
 // ── State ────────────────────────────────────────────────────────────────────
 var ST = {
