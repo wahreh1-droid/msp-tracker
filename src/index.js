@@ -1017,7 +1017,7 @@ var API = '/server/api';
 var ST = {
   servers: [], logs: [], txns: [], users: [],
   billingRows: [], search: '',
-  editId: null, dcId: null, importRows: [], resetId: null,
+  editId: null, dcId: null, importRows: [], resetId: null, billingLoaded: false,
   viewServers: [], viewLogs: [], viewTxns: [],
   currentUser: null
 };
@@ -1090,6 +1090,7 @@ function resetAppState() {
   ST.servers = []; ST.logs = []; ST.txns = []; ST.users = [];
   ST.billingRows = []; ST.viewServers = []; ST.viewLogs = []; ST.viewTxns = [];
   ST.search = ''; ST.editId = null; ST.dcId = null; ST.resetId = null; ST.importRows = [];
+  ST.billingLoaded = false;
 
   var g = document.getElementById('gSearch');
   if (g) g.value = '';
@@ -1165,6 +1166,14 @@ function showTab(name) {
   document.querySelectorAll('.tb').forEach(function(el)  { el.classList.remove('active'); });
   document.getElementById('tab-' + name).classList.add('active');
   document.querySelector('[data-tab="' + name + '"]').classList.add('active');
+
+  // Billing is computed on demand, so the tab would otherwise open empty.
+  // Run it once per session for the default (current month) range; after that
+  // the results persist and the user re-runs it themselves via Calculate.
+  if (name === 'billing' && !ST.billingLoaded) {
+    ST.billingLoaded = true;
+    runBilling();
+  }
 }
 
 // ── API helper ───────────────────────────────────────────────────────────────
