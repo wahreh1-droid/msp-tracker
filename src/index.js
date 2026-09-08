@@ -265,6 +265,120 @@ async function route(req, env, path, url) {
       return J({ ok: true });
     }
 
+    // ── GET /billing?start=&end= ──────────────────────────────────────────
+    // Billing rule (confirmed by the customer): a calendar day is billable if
+    // the server was enabled at ANY point during that day. One hour on = full
+    // day charged. Still enabled when decommissioned = decommission day charged.
+    // Powered off months earlier = only the power-off day was charged, back then.
+    //
+    // This replays status_logs day by day rather than reading the server's
+    // CURRENT on/off flag, so a server switched off mid-period still bills for
+    // the days it actually ran.
+    if (path === '/billing' && m === 'GET') {
+      const startStr = url.searchParams.get('start');
+      const endStr   = url.searchParams.get('end');
+      if (!startStr || !endStr) return E('start and end are required');
+      if (startStr > endStr)    return E('start must be on or before end');
+
+      const todayStr = new Date().toISOString().slice(0, 10);
+      // Never bill days that haven't happened yet
+      const effEnd = endStr < todayStr ? endStr : todayStr;
+      if (effEnd < startStr) {
+        return J({ rows: [], daysInMonth: 0, periodDays: 0, historyFrom: null });
+      }
+
+      // Daily rate divides the monthly cost by the days in the PERIOD START's month
+      const sy = parseInt(startStr.slice(0, 4), 10);
+      const sm = parseInt(startStr.slice(5, 7), 10);
+      const daysInMonth = new Date(Date.UTC(sy, sm, 0)).getUTCDate();
+
+      const dayList = [];
+      for (let d = new Date(startStr + 'T00:00:00Z'); d <= new Date(effEnd + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + 1)) {
+        dayList.push(d.toISOString().slice(0, 10));
+      }
+      const periodDays = Math.round(
+        (new Date(endStr + 'T00:00:00Z') - new Date(startStr + 'T00:00:00Z')) / 86400000
+      ) + 1;
+
+      const servers = (await db.prepare('SELECT * FROM servers').all()).results;
+      const logs    = (await db.prepare(
+        'SELECT server_id, action, timestamp FROM status_logs ORDER BY timestamp ASC'
+      ).all()).results;
+
+      // Earliest log we hold — before this, history can't be reconstructed
+      const historyFrom = logs.length ? String(logs[0].timestamp).slice(0, 10) : null;
+
+      const byServer = {};
+      for (const l of logs) {
+        (byServer[l.server_id] = byServer[l.server_id] || []).push(l);
+      }
+
+      const rows = [];
+      for (const s of servers) {
+        const slogs = byServer[s.id] || [];
+
+        // State entering the period: the last log strictly before the start date.
+        // With no prior log, fall back to the current flag + enabled_date.
+        let state = false;
+        let decommissioned = false;
+        let sawPriorLog = false;
+        for (const l of slogs) {
+          const d = String(l.timestamp).slice(0, 10);
+          if (d >= startStr) break;
+          sawPriorLog = true;
+          if (l.action === 'decommissioned') { state = false; decommissioned = true; }
+          else state = (l.action === 'enabled');
+        }
+        if (!sawPriorLog) {
+          state = !!s.enabled && !!s.enabled_date && s.enabled_date <= startStr && s.status === 'active';
+          decommissioned = s.status === 'decommissioned';
+          // A server decommissioned with no log history has no billable days here
+          if (decommissioned) state = false;
+        }
+
+        // Index this server's in-period logs by day
+        const logsByDay = {};
+        for (const l of slogs) {
+          const d = String(l.timestamp).slice(0, 10);
+          if (d < startStr || d > effEnd) continue;
+          (logsByDay[d] = logsByDay[d] || []).push(l);
+        }
+
+        let billableDays = 0;
+        for (const day of dayList) {
+          const todayLogs = logsByDay[day] || [];
+          // Billable if already on when the day began, OR switched on during it.
+          // A server decommissioned earlier has state=false and no 'enabled'
+          // log, so it correctly bills nothing.
+          if (state || todayLogs.some(l => l.action === 'enabled')) billableDays++;
+          for (const l of todayLogs) {
+            if (l.action === 'decommissioned') { state = false; decommissioned = true; }
+            else state = (l.action === 'enabled');
+          }
+        }
+
+        if (billableDays <= 0) continue;
+
+        const dailyRate = (s.monthly_cost || 0) / daysInMonth;
+        rows.push({
+          id: s.id,
+          server_name: s.server_name,
+          type: s.type,
+          environment: s.environment,
+          enabled_date: s.enabled_date,
+          status: s.status,
+          monthly_cost: s.monthly_cost,
+          daysActive: billableDays,
+          daysInMonth,
+          periodDays,
+          amount: dailyRate * billableDays
+        });
+      }
+
+      rows.sort((a, b) => String(a.server_name).localeCompare(String(b.server_name)));
+      return J({ rows, daysInMonth, periodDays, historyFrom });
+    }
+
     // ── GET /servers ──────────────────────────────────────────────────────
     if (path === '/servers' && m === 'GET') {
       const r = await db.prepare(
@@ -757,7 +871,7 @@ footer a{color:var(--ac);text-decoration:none}
     <table id="billTbl">
       <thead><tr>
         <th>#</th><th>Server Name</th><th>Type</th><th>Environment</th>
-        <th>Enabled Since</th><th>Days Active</th><th>Month Days</th>
+        <th>Enabled Since</th><th>Days Billed</th><th>Month Days</th>
         <th>Monthly Cost</th><th>Amount Due</th>
       </tr></thead>
       <tbody id="billBody"><tr><td colspan="9" class="empty">Set a date range and click Calculate</td></tr></tbody>
@@ -1397,50 +1511,30 @@ function runBilling() {
   if (!startStr || !endStr) { toast('Please select a date range', 'err'); return; }
   if (startStr > endStr)    { toast('Start date must be before end date', 'err'); return; }
 
-  var startDate = new Date(startStr + 'T00:00:00');
-  var endDate   = new Date(endStr   + 'T00:00:00');
-  var today     = new Date(); today.setHours(0, 0, 0, 0);
+  var body = document.getElementById('billBody');
+  body.innerHTML = '<tr><td colspan="9" class="empty"><span class="spin"></span> Calculating...</td></tr>';
+  document.getElementById('billTotal').style.display = 'none';
+  document.getElementById('saveTxnBtn').style.display = 'none';
 
-  // Period days (inclusive)
-  var periodDays = Math.round((endDate - startDate) / 86400000) + 1;
-
-  // Days in the month of the billing period's start (e.g. 30 for September)
-  var daysInMonth = new Date(startDate.getFullYear(), startDate.getMonth() + 1, 0).getDate();
-
-  var results = [];
-
-  ST.servers.forEach(function(s) {
-    if (s.status !== 'active' || !s.enabled || !s.enabled_date) return;
-
-    var enabledDate   = new Date(s.enabled_date + 'T00:00:00');
-    var effectiveStart = enabledDate > startDate ? enabledDate : startDate;
-    // KEY: cap end at today so a server enabled today doesn't bill future days
-    var effectiveEnd   = today < endDate ? today : endDate;
-
-    if (effectiveStart > effectiveEnd) return;
-
-    var daysActive = Math.round((effectiveEnd - effectiveStart) / 86400000) + 1;
-    if (daysActive <= 0) return;
-
-    var dailyRate = s.monthly_cost / daysInMonth;
-    var amount    = dailyRate * daysActive;
-
-    results.push({
-      id: s.id, server_name: s.server_name, type: s.type,
-      environment: s.environment, enabled_date: s.enabled_date,
-      monthly_cost: s.monthly_cost, daysActive: daysActive,
-      daysInMonth: daysInMonth, periodDays: periodDays,
-      amount: amount
+  api('/billing?start=' + encodeURIComponent(startStr) + '&end=' + encodeURIComponent(endStr))
+    .then(function(d) { renderBilling(d, startStr); })
+    .catch(function(e) {
+      body.innerHTML = '<tr><td colspan="9" class="empty">Billing failed: ' + eh(e.message) + '</td></tr>';
+      toast('Billing failed: ' + e.message, 'err');
     });
-  });
+}
 
-  results.sort(function(a, b) { return a.server_name.localeCompare(b.server_name); });
+function renderBilling(d, startStr) {
+  var results     = d.rows || [];
+  var daysInMonth = d.daysInMonth || 0;
+  var periodDays  = d.periodDays || 0;
+
   lastBilling = results;
   ST.billingRows = results;
 
   var body = document.getElementById('billBody');
   if (!results.length) {
-    body.innerHTML = '<tr><td colspan="9" class="empty">No active servers in this period</td></tr>';
+    body.innerHTML = '<tr><td colspan="9" class="empty">No billable server days in this period</td></tr>';
     document.getElementById('billTotal').style.display = 'none';
     document.getElementById('saveTxnBtn').style.display = 'none';
     return;
@@ -1470,9 +1564,15 @@ function runBilling() {
 
   body.innerHTML = html;
 
+  var meta = results.length + ' servers · ' + daysInMonth + '-day month · ' + periodDays + '-day period';
+  // Warn if the period reaches back before the audit log exists — those days
+  // are estimated from the server's current state, not replayed from history.
+  if (d.historyFrom && startStr < d.historyFrom) {
+    meta += ' · history from ' + d.historyFrom;
+  }
+
   document.getElementById('billAmt').textContent = fc(totalAmt);
-  document.getElementById('billMeta').textContent =
-    results.length + ' servers · ' + daysInMonth + '-day month · ' + periodDays + '-day period';
+  document.getElementById('billMeta').textContent = meta;
   document.getElementById('billTotal').style.display = 'flex';
   document.getElementById('saveTxnBtn').style.display = 'inline-flex';
 }
@@ -1552,7 +1652,7 @@ function exportData(kind) {
   }
   if (kind === 'billing') {
     return {
-      headers: ['Server Name', 'Type', 'Environment', 'Enabled Since', 'Days Active', 'Month Days', 'Monthly Cost', 'Amount Due'],
+      headers: ['Server Name', 'Type', 'Environment', 'Enabled Since', 'Days Billed', 'Month Days', 'Monthly Cost', 'Amount Due'],
       rows: ST.billingRows.map(function(r) {
         return [
           r.server_name || '', r.type || '', r.environment || '', r.enabled_date || '',
