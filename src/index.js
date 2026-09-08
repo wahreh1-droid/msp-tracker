@@ -969,20 +969,63 @@ function submitAuthForm(e) {
   return false;
 }
 
+// Wipes all loaded data and rendered rows, and returns to the Dashboard tab.
+// Called on BOTH login and logout so nothing from one session is ever visible
+// in the next — including a panel that was on screen when the last user left.
+function resetAppState() {
+  ST.servers = []; ST.logs = []; ST.txns = []; ST.users = [];
+  ST.billingRows = []; ST.viewServers = []; ST.viewLogs = []; ST.viewTxns = [];
+  ST.search = ''; ST.editId = null; ST.dcId = null; ST.resetId = null; ST.importRows = [];
+
+  var g = document.getElementById('gSearch');
+  if (g) g.value = '';
+
+  // Clear every table body so nothing stays painted in the DOM
+  [['dashBody', 10], ['logsBody', 6], ['txnBody', 10], ['billBody', 9], ['usersBody', 5]]
+    .forEach(function(pair) {
+      var el = document.getElementById(pair[0]);
+      if (el) el.innerHTML = '<tr><td colspan="' + pair[1] + '" class="empty">&nbsp;</td></tr>';
+    });
+
+  var bt = document.getElementById('billTotal');
+  if (bt) bt.style.display = 'none';
+  var stb = document.getElementById('saveTxnBtn');
+  if (stb) stb.style.display = 'none';
+
+  // Close any modal left open
+  ['srvModal','impModal','dcModal','userModal','pwdModal','resetModal'].forEach(function(id) {
+    var el = document.getElementById(id);
+    if (el) el.classList.remove('open');
+  });
+
+  // Force back to Dashboard
+  document.querySelectorAll('.tab').forEach(function(el) { el.classList.remove('active'); });
+  document.querySelectorAll('.tb').forEach(function(el)  { el.classList.remove('active'); });
+  var dt = document.getElementById('tab-dashboard');
+  if (dt) dt.classList.add('active');
+  var db = document.querySelector('[data-tab="dashboard"]');
+  if (db) db.classList.add('active');
+}
+
 function doLogout() {
   fetch(API + '/auth/logout', { method: 'POST' }).then(function() {
     ST.currentUser = null;
+    resetAppState();
+    document.getElementById('usersTabBtn').style.display = 'none';
+    document.getElementById('acctName').textContent = '';
     document.getElementById('authPassword').value = '';
     showAuthScreen('login');
   });
 }
 
 function enterApp(user) {
+  resetAppState();
   ST.currentUser = user;
   document.getElementById('authScreen').style.display = 'none';
   document.getElementById('app').style.display = 'block';
   document.getElementById('acctName').textContent = user.username + ' (' + user.role + ')';
   document.getElementById('usersTabBtn').style.display = user.role === 'admin' ? '' : 'none';
+  document.getElementById('authPassword').value = '';
   loadAll();
 }
 
@@ -1020,7 +1063,14 @@ function api(path, opts) {
   if (opts.body !== undefined) fetchOpts.body = JSON.stringify(opts.body);
   return fetch(API + path, fetchOpts).then(function(r) {
     return r.json().then(function(data) {
-      if (r.status === 401) { showAuthScreen('login'); throw new Error('Session expired — please sign in again'); }
+      if (r.status === 401) {
+        ST.currentUser = null;
+        resetAppState();
+        document.getElementById('usersTabBtn').style.display = 'none';
+        document.getElementById('acctName').textContent = '';
+        showAuthScreen('login');
+        throw new Error('Session expired — please sign in again');
+      }
       if (!r.ok) throw new Error(data.error || 'Request failed (' + r.status + ')');
       return data;
     });
